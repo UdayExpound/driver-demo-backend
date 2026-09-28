@@ -56,27 +56,28 @@ const S = {
   chembur: { name: 'Chembur Site', lat: 19.062, lng: 72.9 },
 };
 
-// Stops shown before the trip starts and routed through in order; the last stop is the customer.
-// Demo only: plant stops sit 0/150/300/450 m along HERE's road route from the plant to the customer
-// (precomputed below). Real positions come from plant master data.
-const PLANT_STOPS = ['Loading gate', 'Silo', 'Gate entry', 'Gate exit'];
-const PICKUP_STOP = 1; // "Confirm pickup" unlocks at the silo
-const ON_ROAD_STOPS = {
-  'T-1001': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
-  'T-1002': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
-  'T-1003': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
-  'T-2001': [[19.01703, 72.86485], [19.018174, 72.865402], [19.018247, 72.866671], [19.018057, 72.86808]],
-  'T-2002': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
-  'T-2003': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
-  'T-2004': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
-  'T-2005': [[19.066, 73.11499], [19.065987, 73.11393], [19.065307, 73.112697], [19.064635, 73.11146]],
-  'T-2006': [[19.066, 73.11499], [19.065987, 73.11393], [19.065307, 73.112697], [19.064635, 73.11146]],
-  'T-2007': [[19.29618, 73.06278], [19.296804, 73.063186], [19.295703, 73.06401], [19.294599, 73.064825]],
-  'T-2008': [[19.29618, 73.06278], [19.296804, 73.063186], [19.295703, 73.06401], [19.294599, 73.064825]],
-  'T-2009': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
-  'T-2010': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
-  'T-2011': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
-  'T-2012': [[19.07603, 73.01837], [19.075836, 73.018551], [19.074498, 73.018732], [19.073169, 73.018971]],
+// Trip stops in order: six inside the plant, then the customer. `radius` (m) = counts as reached.
+// Entry gate and gate out sit on the public road (HERE routes to / from them); the stops in between
+// are inside the plant and joined by straight lines in the app. Demo layouts only: real positions
+// come from plant master data.
+const PLANT_STOPS = [
+  { name: 'Entry gate', radius: 35 },
+  { name: 'Security check', radius: 25 },
+  { name: 'Waiting area', radius: 25 },
+  { name: 'Loading gate', radius: 25 },
+  { name: 'Silo loading', radius: 25 },
+  { name: 'Gate out', radius: 35 },
+];
+const PICKUP_STOP = 4; // "Confirm pickup" unlocks at Silo loading
+const CUSTOMER_RADIUS = 60;
+
+// [entry gate, gate out] on the road outside each demo plant
+const PLANT_GATES = {
+  'Wadala Truck Terminal Plant': [[19.01703, 72.86485], [19.018174, 72.865402]],
+  'Turbhe MIDC Plant': [[19.07603, 73.01837], [19.077367, 73.018182]],
+  'Taloja MIDC Plant': [[19.066, 73.11499], [19.065987, 73.11393]],
+  'Bhiwandi Depot': [[19.29618, 73.06278], [19.296804, 73.063186]],
+  local: [[19.0326, 73.04241], [19.03292, 73.041339]], // T-100x, valid while PICKUP_* in .env is unchanged
 };
 
 function towards(a, b, m) {
@@ -84,17 +85,35 @@ function towards(a, b, m) {
   return { lat: +(a.lat + (b.lat - a.lat) * f).toFixed(6), lng: +(a.lng + (b.lng - a.lng) * f).toFixed(6) };
 }
 
+// Places the internal stops inside the plant, beside the road between the two gates (within ~200 m)
+function plantLayout(entry, exit) {
+  const k = 111320;
+  const cos = Math.cos((entry.lat * Math.PI) / 180);
+  const ex = (exit.lng - entry.lng) * k * cos;
+  const ey = (exit.lat - entry.lat) * k;
+  const len = Math.hypot(ex, ey) || 1;
+  const u = [ex / len, ey / len];
+  const v = [-u[1], u[0]];
+  const at = (a, b) => ({
+    lat: +(entry.lat + (a * u[1] + b * v[1]) / k).toFixed(6),
+    lng: +(entry.lng + (a * u[0] + b * v[0]) / (k * cos)).toFixed(6),
+  });
+  return [entry, at(25, 45), at(40, 130), at(100, 170), at(140, 110), exit];
+}
+
 function withStops(t) {
-  // Precomputed points only apply while the plant hasn't moved (T-100x use PICKUP_* from .env)
-  const onRoad = ON_ROAD_STOPS[t.id];
-  const useOnRoad = onRoad && meters({ lat: onRoad[0][0], lng: onRoad[0][1] }, t.pickup) < 100;
+  const gates = PLANT_GATES[t.pickup.name] || PLANT_GATES.local;
+  let [entry, exit] = gates.map(([lat, lng]) => ({ lat, lng }));
+  if (meters(entry, t.pickup) > 300) {
+    entry = { lat: t.pickup.lat, lng: t.pickup.lng };
+    exit = towards(t.pickup, t.drop, 150);
+  }
   const stops = [
-    ...PLANT_STOPS.map((name, i) =>
-      useOnRoad ? { name, lat: onRoad[i][0], lng: onRoad[i][1] } : { name, ...towards(t.pickup, t.drop, i * 150) }
-    ),
-    { name: t.drop.name, lat: t.drop.lat, lng: t.drop.lng },
+    ...plantLayout(entry, exit).map((p, i) => ({ ...PLANT_STOPS[i], ...p })),
+    { name: t.drop.name, lat: t.drop.lat, lng: t.drop.lng, radius: CUSTOMER_RADIUS },
   ];
-  return { ...t, pickup: { name: t.pickup.name, lat: stops[PICKUP_STOP].lat, lng: stops[PICKUP_STOP].lng }, stops, pickupStop: PICKUP_STOP };
+  const silo = stops[PICKUP_STOP];
+  return { ...t, pickup: { name: t.pickup.name, lat: silo.lat, lng: silo.lng }, stops, pickupStop: PICKUP_STOP };
 }
 
 // In-memory store. Replace with your DB later.
@@ -248,7 +267,7 @@ app.post('/route', async (req, res) => {
     const r = await fetch(`https://router.hereapi.com/v8/routes?${params}`);
     const data = await r.json();
     routeCalls++;
-    console.log(`🗺  HERE route call #${routeCalls} (${r.status}, ${via.length} stops on the way)`);
+    console.log(`HERE route call #${routeCalls} (${r.status}, ${via.length} stops on the way)`);
 
     if (!r.ok) return res.status(502).send(data.title || data.error_description || data.cause || 'HERE Routing API error');
     const sections = data.routes?.[0]?.sections;
