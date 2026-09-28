@@ -15,18 +15,6 @@ if (!KEY) {
 }
 const TRUCK_GROSS_WEIGHT_KG = parseInt(process.env.TRUCK_GROSS_WEIGHT_KG, 10) || 40000;
 
-function coord(name) {
-  const n = parseFloat(process.env[name]);
-  if (Number.isNaN(n)) {
-    console.error(`Set ${name} in backend/.env`);
-    process.exit(1);
-  }
-  return n;
-}
-
-const pickup = { name: process.env.PICKUP_NAME || 'Plant Gate', lat: coord('PICKUP_LAT'), lng: coord('PICKUP_LNG') };
-const drop = { name: process.env.DROP_NAME || 'Customer Site', lat: coord('DROP_LAT'), lng: coord('DROP_LNG') };
-
 const at = (daysFromToday, h, m) => {
   const d = new Date();
   d.setDate(d.getDate() + daysFromToday);
@@ -34,112 +22,71 @@ const at = (daysFromToday, h, m) => {
   return d.toISOString();
 };
 
-// Mumbai sample plants and customer sites (approximate area coordinates; Google snaps to the nearest road)
-const P = {
-  turbhe: { name: 'Turbhe MIDC Plant', lat: 19.076, lng: 73.018 },
-  taloja: { name: 'Taloja MIDC Plant', lat: 19.066, lng: 73.115 },
-  wadala: { name: 'Wadala Truck Terminal Plant', lat: 19.017, lng: 72.865 },
-  bhiwandi: { name: 'Bhiwandi Depot', lat: 19.296, lng: 73.063 },
+// Plant checkpoints, surveyed on site. Every trip uses the same six so the flow can be tested
+// repeatedly. `radius` (m) = counts as reached; inside the plant stops are reached in this order.
+const PLANT = {
+  name: 'GCC Test Plant',
+  stops: [
+    { name: 'Entry gate', lat: 19.114051, lng: 72.893248, radius: 20 },
+    { name: 'Security check', lat: 19.113715, lng: 72.892954, radius: 15 },
+    { name: 'Waiting area', lat: 19.112686, lng: 72.893075, radius: 15 },
+    { name: 'Loading gate', lat: 19.112392, lng: 72.893295, radius: 15 },
+    { name: 'Silo loading', lat: 19.112819, lng: 72.892895, radius: 15 },
+    { name: 'Gate out', lat: 19.113602, lng: 72.892435, radius: 20 },
+  ],
 };
-const S = {
-  bkc: { name: 'BKC Tower Site', lat: 19.066, lng: 72.868 },
-  lowerParel: { name: 'Lower Parel Site', lat: 18.996, lng: 72.83 },
-  powai: { name: 'Powai Site', lat: 19.118, lng: 72.906 },
-  thane: { name: 'Ghodbunder Road Thane Site', lat: 19.25, lng: 72.97 },
-  worli: { name: 'Worli Site', lat: 19.01, lng: 72.817 },
-  goregaon: { name: 'Goregaon East Site', lat: 19.164, lng: 72.849 },
-  vashi: { name: 'Vashi Site', lat: 19.077, lng: 72.999 },
-  kharghar: { name: 'Kharghar Site', lat: 19.047, lng: 73.069 },
-  panvel: { name: 'Panvel Site', lat: 18.989, lng: 73.117 },
-  mulund: { name: 'Mulund West Site', lat: 19.173, lng: 72.956 },
-  andheri: { name: 'Andheri East Site', lat: 19.115, lng: 72.869 },
-  chembur: { name: 'Chembur Site', lat: 19.062, lng: 72.9 },
-};
-
-// Trip stops in order: six inside the plant, then the customer. `radius` (m) = counts as reached.
-// Entry gate and gate out sit on the public road (HERE routes to / from them); the stops in between
-// are inside the plant and joined by straight lines in the app. Demo layouts only: real positions
-// come from plant master data.
-const PLANT_STOPS = [
-  { name: 'Entry gate', radius: 35 },
-  { name: 'Security check', radius: 25 },
-  { name: 'Waiting area', radius: 25 },
-  { name: 'Loading gate', radius: 25 },
-  { name: 'Silo loading', radius: 25 },
-  { name: 'Gate out', radius: 35 },
-];
 const PICKUP_STOP = 4; // "Confirm pickup" unlocks at Silo loading
 const CUSTOMER_RADIUS = 60;
 
-// [entry gate, gate out] on the road outside each demo plant
-const PLANT_GATES = {
-  'Wadala Truck Terminal Plant': [[19.01703, 72.86485], [19.018174, 72.865402]],
-  'Turbhe MIDC Plant': [[19.07603, 73.01837], [19.077367, 73.018182]],
-  'Taloja MIDC Plant': [[19.066, 73.11499], [19.065987, 73.11393]],
-  'Bhiwandi Depot': [[19.29618, 73.06278], [19.296804, 73.063186]],
-  local: [[19.0326, 73.04241], [19.03292, 73.041339]], // T-100x, valid while PICKUP_* in .env is unchanged
+// Customer sites about 4-5 km (straight line) from the plant's gate out
+const S = {
+  andheriWest: { name: 'Andheri West Site', lat: 19.1197, lng: 72.8464 },
+  kurla: { name: 'Kurla West Site', lat: 19.0726, lng: 72.8845 },
+  jogeshwari: { name: 'Jogeshwari East Site', lat: 19.1395, lng: 72.8555 },
+  kanjurmarg: { name: 'Kanjurmarg East Site', lat: 19.129, lng: 72.933 },
+  vileParle: { name: 'Vile Parle East Site', lat: 19.099, lng: 72.849 },
+  goregaon: { name: 'Goregaon East Site', lat: 19.155, lng: 72.875 },
+  ghatkopar: { name: 'Ghatkopar East Site', lat: 19.08, lng: 72.91 },
+  vidyavihar: { name: 'Vidyavihar Site', lat: 19.079, lng: 72.897 },
+  vikhroli: { name: 'Vikhroli West Site', lat: 19.108, lng: 72.929 },
+  kalina: { name: 'Kalina Site', lat: 19.076, lng: 72.863 },
+  bhandup: { name: 'Bhandup West Site', lat: 19.144, lng: 72.93 },
+  vakola: { name: 'Vakola Site', lat: 19.085, lng: 72.859 },
 };
 
-function towards(a, b, m) {
-  const f = Math.min(1, m / meters(a, b));
-  return { lat: +(a.lat + (b.lat - a.lat) * f).toFixed(6), lng: +(a.lng + (b.lng - a.lng) * f).toFixed(6) };
-}
-
-// Places the internal stops inside the plant, beside the road between the two gates (within ~200 m)
-function plantLayout(entry, exit) {
-  const k = 111320;
-  const cos = Math.cos((entry.lat * Math.PI) / 180);
-  const ex = (exit.lng - entry.lng) * k * cos;
-  const ey = (exit.lat - entry.lat) * k;
-  const len = Math.hypot(ex, ey) || 1;
-  const u = [ex / len, ey / len];
-  const v = [-u[1], u[0]];
-  const at = (a, b) => ({
-    lat: +(entry.lat + (a * u[1] + b * v[1]) / k).toFixed(6),
-    lng: +(entry.lng + (a * u[0] + b * v[0]) / (k * cos)).toFixed(6),
-  });
-  return [entry, at(25, 45), at(40, 130), at(100, 170), at(140, 110), exit];
-}
-
-function withStops(t) {
-  const gates = PLANT_GATES[t.pickup.name] || PLANT_GATES.local;
-  let [entry, exit] = gates.map(([lat, lng]) => ({ lat, lng }));
-  if (meters(entry, t.pickup) > 300) {
-    entry = { lat: t.pickup.lat, lng: t.pickup.lng };
-    exit = towards(t.pickup, t.drop, 150);
-  }
-  const stops = [
-    ...plantLayout(entry, exit).map((p, i) => ({ ...PLANT_STOPS[i], ...p })),
-    { name: t.drop.name, lat: t.drop.lat, lng: t.drop.lng, radius: CUSTOMER_RADIUS },
-  ];
-  const silo = stops[PICKUP_STOP];
-  return { ...t, pickup: { name: t.pickup.name, lat: silo.lat, lng: silo.lng }, stops, pickupStop: PICKUP_STOP };
+function makeTrip([id, customer, material, vehicleNo, site, scheduledAt]) {
+  const silo = PLANT.stops[PICKUP_STOP];
+  return {
+    id, customer, material, vehicleNo, scheduledAt,
+    pickup: { name: PLANT.name, lat: silo.lat, lng: silo.lng },
+    drop: { ...site },
+    stops: [...PLANT.stops, { ...site, radius: CUSTOMER_RADIUS }],
+    pickupStop: PICKUP_STOP,
+    status: 'ASSIGNED',
+    lastLocation: null,
+    track: [],
+  };
 }
 
 // In-memory store. Replace with your DB later.
 function seed() {
-  const local = [
-    { id: 'T-1001', customer: 'Green Concrete', material: 'OPC 53 Grade, 50 TON', vehicleNo: 'GCC-VTO 10', scheduledAt: at(0, 10, 30) },
-    { id: 'T-1002', customer: 'Skyline Builders', material: 'PPC, 40 TON', vehicleNo: 'GCC-VTO 10', scheduledAt: at(1, 9, 0) },
-    { id: 'T-1003', customer: 'Harbor Infra', material: 'OPC 43 Grade, 45 TON', vehicleNo: 'GCC-VTO 10', scheduledAt: at(3, 14, 15) },
-  ].map((t) => ({ ...t, pickup, drop }));
-
-  const mumbai = [
-    ['T-2001', 'BKC Commercial Projects', 'OPC 53 Grade, 40 TON', 'MH-43 BX 4102', P.wadala, S.bkc, at(0, 7, 30)],
-    ['T-2002', 'Parel Heights Builders', 'PPC, 35 TON', 'MH-43 BX 4102', P.wadala, S.lowerParel, at(0, 11, 0)],
-    ['T-2003', 'Vashi Infra Works', 'OPC 53 Grade, 45 TON', 'MH-43 BX 4118', P.turbhe, S.vashi, at(0, 15, 30)],
-    ['T-2004', 'Lakeside Powai Developers', 'GGBS Blend, 30 TON', 'MH-43 BX 4118', P.turbhe, S.powai, at(1, 6, 45)],
-    ['T-2005', 'Kharghar Residency LLP', 'OPC 43 Grade, 40 TON', 'MH-43 BX 4125', P.taloja, S.kharghar, at(1, 9, 30)],
-    ['T-2006', 'Panvel Township Constructions', 'PPC, 45 TON', 'MH-43 BX 4125', P.taloja, S.panvel, at(1, 13, 0)],
-    ['T-2007', 'Ghodbunder Towers Pvt Ltd', 'OPC 53 Grade, 35 TON', 'MH-43 BX 4131', P.bhiwandi, S.thane, at(2, 8, 0)],
-    ['T-2008', 'Mulund Greens Builders', 'GGBS Blend, 40 TON', 'MH-43 BX 4131', P.bhiwandi, S.mulund, at(2, 12, 15)],
-    ['T-2009', 'Worli Sea Face Projects', 'OPC 43 Grade, 30 TON', 'MH-43 BX 4102', P.wadala, S.worli, at(3, 7, 0)],
-    ['T-2010', 'Goregaon Film City Infra', 'OPC 53 Grade, 40 TON', 'MH-43 BX 4118', P.turbhe, S.goregaon, at(4, 10, 30)],
-    ['T-2011', 'Andheri Metro Contractors', 'PPC, 45 TON', 'MH-43 BX 4125', P.wadala, S.andheri, at(5, 9, 0)],
-    ['T-2012', 'Chembur Skyline LLP', 'OPC 53 Grade, 50 TON', 'MH-43 BX 4131', P.turbhe, S.chembur, at(6, 14, 0)],
-  ].map(([id, customer, material, vehicleNo, pk, dr, scheduledAt]) => ({ id, customer, material, vehicleNo, pickup: pk, drop: dr, scheduledAt }));
-
-  return [...local, ...mumbai].map((t) => ({ ...withStops(t), status: 'ASSIGNED', lastLocation: null, track: [] }));
+  return [
+    ['T-1001', 'Green Concrete', 'OPC 53 Grade, 50 TON', 'GCC-VTO 10', S.andheriWest, at(0, 10, 30)],
+    ['T-1002', 'Skyline Builders', 'PPC, 40 TON', 'GCC-VTO 10', S.kurla, at(1, 9, 0)],
+    ['T-1003', 'Harbor Infra', 'OPC 43 Grade, 45 TON', 'GCC-VTO 10', S.jogeshwari, at(3, 14, 15)],
+    ['T-2001', 'Kanjur Commercial Projects', 'OPC 53 Grade, 40 TON', 'MH-02 BX 4102', S.kanjurmarg, at(0, 7, 30)],
+    ['T-2002', 'Parle Heights Builders', 'PPC, 35 TON', 'MH-02 BX 4102', S.vileParle, at(0, 12, 0)],
+    ['T-2003', 'Aarey Infra Works', 'OPC 53 Grade, 45 TON', 'MH-02 BX 4118', S.goregaon, at(0, 15, 30)],
+    ['T-2004', 'Ghatkopar Metro Developers', 'GGBS Blend, 30 TON', 'MH-02 BX 4118', S.ghatkopar, at(1, 6, 45)],
+    ['T-2005', 'Vidyavihar Residency LLP', 'OPC 43 Grade, 40 TON', 'MH-02 BX 4125', S.vidyavihar, at(1, 11, 30)],
+    ['T-2006', 'Vikhroli Township Constructions', 'PPC, 45 TON', 'MH-02 BX 4125', S.vikhroli, at(1, 15, 0)],
+    ['T-2007', 'Kalina Campus Projects', 'OPC 53 Grade, 35 TON', 'MH-02 BX 4131', S.kalina, at(2, 8, 0)],
+    ['T-2008', 'Bhandup Greens Builders', 'GGBS Blend, 40 TON', 'MH-02 BX 4131', S.bhandup, at(2, 12, 15)],
+    ['T-2009', 'Vakola Heights Pvt Ltd', 'OPC 43 Grade, 30 TON', 'MH-02 BX 4102', S.vakola, at(3, 7, 0)],
+    ['T-2010', 'Andheri Metro Contractors', 'OPC 53 Grade, 40 TON', 'MH-02 BX 4118', S.andheriWest, at(4, 10, 30)],
+    ['T-2011', 'Kurla Junction Infra', 'PPC, 45 TON', 'MH-02 BX 4125', S.kurla, at(5, 9, 0)],
+    ['T-2012', 'Jogeshwari Skyline LLP', 'OPC 53 Grade, 50 TON', 'MH-02 BX 4131', S.jogeshwari, at(6, 14, 0)],
+  ].map(makeTrip);
 }
 let trips = seed();
 
