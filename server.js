@@ -1,16 +1,19 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const flexpolyline = require('@here/flexpolyline');
+const polyline = require('@mapbox/polyline');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const KEY = process.env.GOOGLE_MAPS_API_KEY;
+const KEY = process.env.HERE_API_KEY;
 if (!KEY) {
-  console.error('Missing GOOGLE_MAPS_API_KEY in backend/.env');
+  console.error('Missing HERE_API_KEY in backend/.env');
   process.exit(1);
 }
+const TRUCK_GROSS_WEIGHT_KG = parseInt(process.env.TRUCK_GROSS_WEIGHT_KG, 10) || 40000;
 
 function coord(name) {
   const n = parseFloat(process.env[name]);
@@ -53,6 +56,47 @@ const S = {
   chembur: { name: 'Chembur Site', lat: 19.062, lng: 72.9 },
 };
 
+// Stops shown before the trip starts and routed through in order; the last stop is the customer.
+// Demo only: plant stops sit 0/150/300/450 m along HERE's road route from the plant to the customer
+// (precomputed below). Real positions come from plant master data.
+const PLANT_STOPS = ['Loading gate', 'Silo', 'Gate entry', 'Gate exit'];
+const PICKUP_STOP = 1; // "Confirm pickup" unlocks at the silo
+const ON_ROAD_STOPS = {
+  'T-1001': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
+  'T-1002': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
+  'T-1003': [[19.0326, 73.04241], [19.03292, 73.041339], [19.031572, 73.041363], [19.030375, 73.041169]],
+  'T-2001': [[19.01703, 72.86485], [19.018174, 72.865402], [19.018247, 72.866671], [19.018057, 72.86808]],
+  'T-2002': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
+  'T-2003': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
+  'T-2004': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
+  'T-2005': [[19.066, 73.11499], [19.065987, 73.11393], [19.065307, 73.112697], [19.064635, 73.11146]],
+  'T-2006': [[19.066, 73.11499], [19.065987, 73.11393], [19.065307, 73.112697], [19.064635, 73.11146]],
+  'T-2007': [[19.29618, 73.06278], [19.296804, 73.063186], [19.295703, 73.06401], [19.294599, 73.064825]],
+  'T-2008': [[19.29618, 73.06278], [19.296804, 73.063186], [19.295703, 73.06401], [19.294599, 73.064825]],
+  'T-2009': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
+  'T-2010': [[19.07603, 73.01837], [19.077367, 73.018182], [19.078679, 73.017892], [19.079939, 73.017409]],
+  'T-2011': [[19.01703, 72.86485], [19.017891, 72.86401], [19.018513, 72.862969], [19.018634, 72.861548]],
+  'T-2012': [[19.07603, 73.01837], [19.075836, 73.018551], [19.074498, 73.018732], [19.073169, 73.018971]],
+};
+
+function towards(a, b, m) {
+  const f = Math.min(1, m / meters(a, b));
+  return { lat: +(a.lat + (b.lat - a.lat) * f).toFixed(6), lng: +(a.lng + (b.lng - a.lng) * f).toFixed(6) };
+}
+
+function withStops(t) {
+  // Precomputed points only apply while the plant hasn't moved (T-100x use PICKUP_* from .env)
+  const onRoad = ON_ROAD_STOPS[t.id];
+  const useOnRoad = onRoad && meters({ lat: onRoad[0][0], lng: onRoad[0][1] }, t.pickup) < 100;
+  const stops = [
+    ...PLANT_STOPS.map((name, i) =>
+      useOnRoad ? { name, lat: onRoad[i][0], lng: onRoad[i][1] } : { name, ...towards(t.pickup, t.drop, i * 150) }
+    ),
+    { name: t.drop.name, lat: t.drop.lat, lng: t.drop.lng },
+  ];
+  return { ...t, pickup: { name: t.pickup.name, lat: stops[PICKUP_STOP].lat, lng: stops[PICKUP_STOP].lng }, stops, pickupStop: PICKUP_STOP };
+}
+
 // In-memory store. Replace with your DB later.
 function seed() {
   const local = [
@@ -76,7 +120,7 @@ function seed() {
     ['T-2012', 'Chembur Skyline LLP', 'OPC 53 Grade, 50 TON', 'MH-43 BX 4131', P.turbhe, S.chembur, at(6, 14, 0)],
   ].map(([id, customer, material, vehicleNo, pk, dr, scheduledAt]) => ({ id, customer, material, vehicleNo, pickup: pk, drop: dr, scheduledAt }));
 
-  return [...local, ...mumbai].map((t) => ({ ...t, status: 'ASSIGNED', lastLocation: null, track: [] }));
+  return [...local, ...mumbai].map((t) => ({ ...withStops(t), status: 'ASSIGNED', lastLocation: null, track: [] }));
 }
 let trips = seed();
 
@@ -129,18 +173,16 @@ app.post('/dev/reset', (req, res) => {
   res.json({ ok: true });
 });
 
-// Proxy to Google Routes API so the key stays on the server
+// Proxy to HERE Routing API v8 (truck mode, live traffic) so the key stays on the server
 let routeCalls = 0;
 let cacheHits = 0;
-const ll = (p) => ({ latLng: { latitude: p.lat, longitude: p.lng } });
-const fromLL = (l) => ({ lat: l.latLng.latitude, lng: l.latLng.longitude });
 
-// Route cache: same destination + start within 150 m + younger than 10 min -> reuse, no Google call.
+// Route cache: same stops + start within 150 m + younger than 10 min -> reuse, no HERE call.
 // Reroutes always skip the cache (the driver has left the old route).
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const CACHE_RADIUS_M = 150;
-const routeCache = new Map(); // destination key -> [{ origin, at, route }]
-const destKey = (d) => `${d.lat.toFixed(5)},${d.lng.toFixed(5)}`;
+const routeCache = new Map(); // stops key -> [{ origin, at, route }]
+const stopsKey = (via, d) => [...via, d].map((p) => `${p.lat.toFixed(5)},${p.lng.toFixed(5)}`).join('|');
 function meters(a, b) {
   const R = 6371000;
   const toRad = (x) => (x * Math.PI) / 180;
@@ -149,80 +191,104 @@ function meters(a, b) {
   const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(h));
 }
-function fromCache(origin, destination) {
-  const fresh = (routeCache.get(destKey(destination)) || []).filter((e) => Date.now() - e.at < CACHE_TTL_MS);
-  routeCache.set(destKey(destination), fresh);
+function fromCache(origin, key) {
+  const fresh = (routeCache.get(key) || []).filter((e) => Date.now() - e.at < CACHE_TTL_MS);
+  routeCache.set(key, fresh);
   return fresh.find((e) => meters(e.origin, origin) <= CACHE_RADIUS_M)?.route;
 }
-function toCache(origin, destination, route) {
-  routeCache.get(destKey(destination)).push({ origin, at: Date.now(), route });
+function toCache(origin, key, route) {
+  routeCache.get(key).push({ origin, at: Date.now(), route });
+}
+
+// HERE action -> maneuver names the app already has icons for
+function maneuverOf(a) {
+  const side = a.direction === 'left' ? 'LEFT' : 'RIGHT';
+  if (a.action === 'arrive') return 'ARRIVE';
+  if (a.action === 'uTurn') return `UTURN_${side}`;
+  if (a.action.startsWith('roundabout')) return `ROUNDABOUT_${side}`;
+  if (a.action === 'keep') return `FORK_${side}`;
+  if (a.action === 'exit' || a.action === 'ramp' || a.action === 'enterHighway') return `RAMP_${side}`;
+  if (a.action === 'turn' && a.direction !== 'middle') {
+    if (a.severity === 'light') return `TURN_SLIGHT_${side}`;
+    if (a.severity === 'heavy') return `TURN_SHARP_${side}`;
+    return `TURN_${side}`;
+  }
+  return '';
 }
 
 app.get('/stats', (req, res) => {
-  res.json({ googleCalls: routeCalls, cacheHits });
+  res.json({ provider: 'HERE', routeCalls, cacheHits });
 });
 
+// Body: { origin, destination, via?: [stops in order], reroute? }; stops may carry a `name`
 app.post('/route', async (req, res) => {
-  const { origin, destination, reroute = false } = req.body;
+  const { origin, destination, via = [], reroute = false } = req.body;
   if (!origin || !destination) return res.status(400).send('origin and destination required');
 
-  const cached = fromCache(origin, destination);
+  const key = stopsKey(via, destination);
+  const cached = fromCache(origin, key);
   if (!reroute && cached) {
     cacheHits++;
-    console.log(`♻️  Route from cache (Google calls: ${routeCalls}, cache hits: ${cacheHits})`);
+    console.log(`♻️  Route from cache (HERE calls: ${routeCalls}, cache hits: ${cacheHits})`);
     return res.json(cached);
   }
 
+  const params = new URLSearchParams({
+    transportMode: 'truck',
+    origin: `${origin.lat},${origin.lng}`,
+    destination: `${destination.lat},${destination.lng}`,
+    return: 'polyline,summary,actions,instructions',
+    lang: 'en-US',
+    'vehicle[grossWeight]': String(TRUCK_GROSS_WEIGHT_KG),
+    apiKey: KEY,
+  });
+  via.forEach((v) => params.append('via', `${v.lat},${v.lng}`));
+
   try {
-    const r = await fetch('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': KEY,
-        'X-Goog-FieldMask': [
-          'routes.duration',
-          'routes.distanceMeters',
-          'routes.polyline.encodedPolyline',
-          'routes.legs.steps.distanceMeters',
-          'routes.legs.steps.startLocation',
-          'routes.legs.steps.endLocation',
-          'routes.legs.steps.navigationInstruction',
-        ].join(','),
-      },
-      body: JSON.stringify({
-        origin: { location: ll(origin) },
-        destination: { location: ll(destination) },
-        travelMode: 'DRIVE',
-        routingPreference: 'TRAFFIC_AWARE',
-        languageCode: 'en',
-        units: 'METRIC',
-      }),
-    });
+    const r = await fetch(`https://router.hereapi.com/v8/routes?${params}`);
     const data = await r.json();
     routeCalls++;
-    console.log(`🗺  Google Routes call #${routeCalls} (${r.status})`);
+    console.log(`🗺  HERE route call #${routeCalls} (${r.status}, ${via.length} stops on the way)`);
 
-    if (!r.ok) return res.status(502).send(data.error?.message || 'Routes API error');
-    const route = data.routes?.[0];
-    if (!route) return res.status(404).send('No drivable route found between these points');
+    if (!r.ok) return res.status(502).send(data.title || data.error_description || data.cause || 'HERE Routing API error');
+    const sections = data.routes?.[0]?.sections;
+    if (!sections?.length) return res.status(404).send('No drivable truck route found between these points');
+
+    // One section per stop: join their lines and turn-by-turn actions into one route
+    const stopNames = [...via, destination].map((p) => p.name);
+    const coords = [];
+    const steps = [];
+    let distanceMeters = 0;
+    let durationSec = 0;
+    sections.forEach((s, si) => {
+      const pts = flexpolyline.decode(s.polyline).polyline.map(([lat, lng]) => ({ lat, lng }));
+      const actions = s.actions || [];
+      actions.forEach((a, k) => {
+        const endIdx = k + 1 < actions.length ? actions[k + 1].offset : pts.length - 1;
+        steps.push({
+          distanceMeters: a.length || 0,
+          start: pts[a.offset],
+          end: pts[endIdx],
+          instruction: a.action === 'arrive' && stopNames[si] ? `Arrive at ${stopNames[si]}` : a.instruction || '',
+          maneuver: maneuverOf(a),
+        });
+      });
+      coords.push(...pts);
+      distanceMeters += s.summary?.length || 0;
+      durationSec += s.summary?.duration || 0;
+    });
 
     const result = {
-      distanceMeters: route.distanceMeters || 0,
-      durationSec: parseInt(route.duration, 10) || 0,
-      polyline: route.polyline.encodedPolyline,
-      steps: (route.legs?.[0]?.steps || []).map((s) => ({
-        distanceMeters: s.distanceMeters || 0,
-        start: fromLL(s.startLocation),
-        end: fromLL(s.endLocation),
-        instruction: s.navigationInstruction?.instructions || '',
-        maneuver: s.navigationInstruction?.maneuver || '',
-      })),
+      distanceMeters,
+      durationSec,
+      polyline: polyline.encode(coords.map((p) => [p.lat, p.lng])),
+      steps,
     };
-    toCache(origin, destination, result);
+    toCache(origin, key, result);
     res.json(result);
   } catch (e) {
     console.error(e);
-    res.status(500).send('Could not reach Google Routes API');
+    res.status(500).send('Could not reach HERE Routing API');
   }
 });
 
